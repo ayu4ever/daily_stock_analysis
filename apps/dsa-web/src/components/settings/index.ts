@@ -6,6 +6,8 @@ export * from './NotificationTestPanel';
 export * from './SettingsField';
 export * from './SettingsHelpButton';
 export * from './SettingsLoading';
+export * from './SettingsPanelErrorBoundary';
 export * from './SettingsSectionCard';
 export * from './SettingsCategoryNav';
 export * from './AuthSettingsCard';
+export * from './GenerationBackendStatusPanel';

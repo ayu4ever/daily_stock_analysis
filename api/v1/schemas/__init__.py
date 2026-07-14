@@ -14,6 +14,7 @@ from api.v1.schemas.common import (
     ErrorResponse,
     SuccessResponse,
 )
+from api.v1.schemas.market_phase import MarketPhaseSummary
 from api.v1.schemas.analysis import (
     AnalyzeRequest,
     AnalysisResultResponse,
@@ -82,6 +83,7 @@ from api.v1.schemas.portfolio import (
     PortfolioCashLedgerListResponse,
     PortfolioCorporateActionListItem,
     PortfolioCorporateActionListResponse,
+    PortfolioPositionAnalysisRequest,
     PortfolioPositionItem,
     PortfolioAccountSnapshot,
     PortfolioSnapshotResponse,
@@ -91,7 +93,37 @@ from api.v1.schemas.portfolio import (
     PortfolioImportBrokerItem,
     PortfolioImportBrokerListResponse,
     PortfolioFxRefreshResponse,
+    PortfolioDecisionSignalRiskBlock,
+    PortfolioDecisionSignalRiskItem,
     PortfolioRiskResponse,
+)
+from api.v1.schemas.alerts import (
+    AlertDeleteResponse,
+    AlertNotificationItem,
+    AlertNotificationListResponse,
+    AlertRuleCreateRequest,
+    AlertRuleItem,
+    AlertRuleListResponse,
+    AlertRuleTestResponse,
+    AlertRuleUpdateRequest,
+    AlertTriggerItem,
+    AlertTriggerListResponse,
+)
+from api.v1.schemas.decision_signals import (
+    DecisionProfile,
+    DecisionSignalCreateRequest,
+    DecisionSignalFeedbackItem,
+    DecisionSignalFeedbackRequest,
+    DecisionSignalItem,
+    DecisionSignalListResponse,
+    DecisionSignalMutationResponse,
+    DecisionSignalOutcomeItem,
+    DecisionSignalOutcomeListResponse,
+    DecisionSignalOutcomeRunRequest,
+    DecisionSignalOutcomeRunResponse,
+    DecisionSignalOutcomeStatsBucket,
+    DecisionSignalOutcomeStatsResponse,
+    DecisionSignalStatusUpdateRequest,
 )
 
 __all__ = [
@@ -100,6 +132,8 @@ __all__ = [
     "HealthResponse",
     "ErrorResponse",
     "SuccessResponse",
+    # market phase
+    "MarketPhaseSummary",
     # analysis
     "AnalyzeRequest",
     "AnalysisResultResponse",
@@ -163,6 +197,7 @@ __all__ = [
     "PortfolioCashLedgerListResponse",
     "PortfolioCorporateActionListItem",
     "PortfolioCorporateActionListResponse",
+    "PortfolioPositionAnalysisRequest",
     "PortfolioPositionItem",
     "PortfolioAccountSnapshot",
     "PortfolioSnapshotResponse",
@@ -172,5 +207,33 @@ __all__ = [
     "PortfolioImportBrokerItem",
     "PortfolioImportBrokerListResponse",
     "PortfolioFxRefreshResponse",
+    "PortfolioDecisionSignalRiskBlock",
+    "PortfolioDecisionSignalRiskItem",
     "PortfolioRiskResponse",
+    # alerts
+    "AlertDeleteResponse",
+    "AlertNotificationItem",
+    "AlertNotificationListResponse",
+    "AlertRuleCreateRequest",
+    "AlertRuleItem",
+    "AlertRuleListResponse",
+    "AlertRuleTestResponse",
+    "AlertRuleUpdateRequest",
+    "AlertTriggerItem",
+    "AlertTriggerListResponse",
+    # decision signals
+    "DecisionProfile",
+    "DecisionSignalCreateRequest",
+    "DecisionSignalFeedbackItem",
+    "DecisionSignalFeedbackRequest",
+    "DecisionSignalItem",
+    "DecisionSignalListResponse",
+    "DecisionSignalMutationResponse",
+    "DecisionSignalOutcomeItem",
+    "DecisionSignalOutcomeListResponse",
+    "DecisionSignalOutcomeRunRequest",
+    "DecisionSignalOutcomeRunResponse",
+    "DecisionSignalOutcomeStatsBucket",
+    "DecisionSignalOutcomeStatsResponse",
+    "DecisionSignalStatusUpdateRequest",
 ]

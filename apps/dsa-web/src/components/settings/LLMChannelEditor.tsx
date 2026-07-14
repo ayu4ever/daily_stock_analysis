@@ -13,6 +13,7 @@ import {
   getProviderTemplate,
   isKnownProviderTemplate,
 } from './llmProviderTemplates';
+import { SettingsHelpButton } from './SettingsHelpButton';
 
 const PROTOCOL_OPTIONS: Array<{ value: ChannelProtocol; label: string }> = [
   { value: 'openai', label: 'OpenAI Compatible' },
@@ -47,7 +48,11 @@ const KNOWN_MODEL_PREFIXES = new Set([
   'friendliai',
 ]);
 
+const CHANNEL_FIELD_SUFFIXES = ['PROTOCOL', 'BASE_URL', 'API_KEY', 'API_KEYS', 'MODELS', 'EXTRA_HEADERS', 'ENABLED'] as const;
+const CHANNEL_FIELD_KEY_PATTERN = /^LLM_([A-Z0-9_]+)_(PROTOCOL|BASE_URL|API_KEY|API_KEYS|MODELS|EXTRA_HEADERS|ENABLED)$/;
 const FALSEY_VALUES = new Set(['0', 'false', 'no', 'off']);
+const HERMES_CHANNEL_NAME = 'hermes';
+const HERMES_DEFAULT_MODEL = 'hermes-agent';
 
 const RUNTIME_CAPABILITY_OPTIONS: Array<{ value: LLMCapabilityCheck; label: string; hint: string }> = [
   { value: 'json', label: 'JSON', hint: '检测 response_format JSON 输出是否可用。' },
@@ -61,6 +66,54 @@ const CAPABILITY_STATUS_LABELS: Record<LLMCapabilityCheckResult['status'], strin
   failed: '失败',
   skipped: '跳过',
 };
+
+const isHermesChannel = (channel: Pick<ChannelConfig, 'name'>): boolean => (
+  channel.name.trim().toLowerCase() === HERMES_CHANNEL_NAME
+);
+
+function canonicalizeHermesRouteModel(model: string): string {
+  const trimmed = model.trim() || HERMES_DEFAULT_MODEL;
+  return trimmed.startsWith('openai/') ? trimmed : `openai/${trimmed}`;
+}
+
+function routeIdentityCandidates(model: string): Set<string> {
+  const trimmed = model.trim();
+  if (!trimmed) return new Set();
+  const candidates = new Set<string>([trimmed]);
+  if (!trimmed.startsWith('openai/') && !trimmed.includes('/')) {
+    candidates.add(`openai/${trimmed}`);
+  }
+  return candidates;
+}
+
+function getRouteProvenance(
+  routeProvenanceMap: Map<string, RouteProvenance>,
+  model: string,
+): RouteProvenance | undefined {
+  for (const candidate of routeIdentityCandidates(model)) {
+    const origin = routeProvenanceMap.get(candidate);
+    if (origin) return origin;
+  }
+  return undefined;
+}
+
+const shouldUseSavedHermesSecret = (
+  channel: Pick<ChannelConfig, 'name' | 'apiKey'>,
+  maskToken: string,
+  hasPersistedSecret: boolean,
+): boolean => (
+  isHermesChannel(channel) && channel.apiKey === maskToken && hasPersistedSecret
+);
+
+const hasRuntimeOnlyMaskedHermesSecret = (
+  channel: Pick<ChannelConfig, 'name' | 'apiKey'>,
+  maskToken: string,
+  hasPersistedSecret: boolean,
+): boolean => (
+  isHermesChannel(channel) && channel.apiKey === maskToken && !hasPersistedSecret
+);
+
+const RUNTIME_ONLY_HERMES_SECRET_MESSAGE = '运行时注入的 Hermes Key 不会回传；如需在设置页测试，请重新输入 Key 或保存到 .env。';
 
 interface ChannelConfig {
   id: string;
@@ -102,10 +155,11 @@ interface RuntimeConfig {
 }
 
 interface LLMChannelEditorProps {
-  items: Array<{ key: string; value: string }>;
+  items: Array<{ key: string; value: string; rawValueExists?: boolean }>;
   configVersion: string;
   maskToken: string;
   onSaved: (updatedItems: Array<{ key: string; value: string }>) => void | Promise<void>;
+  onDraftItemsChange?: (items: Array<{ key: string; value: string }>) => void;
   disabled?: boolean;
 }
 
@@ -126,6 +180,221 @@ interface ChannelRowProps {
   onDiscoverModels: (channel: ChannelConfig) => void;
   onToggleCapability: (channel: ChannelConfig, capability: LLMCapabilityCheck) => void;
   onCheckCapabilities: (channel: ChannelConfig) => void;
+}
+
+const LLM_CHANNEL_HELP_DOCS = [
+  {
+    label: 'LLM 配置指南',
+    href: 'https://github.com/ZhuLinsen/daily_stock_analysis/blob/main/docs/LLM_CONFIG_GUIDE.md',
+  },
+  {
+    label: 'LLM 服务商配置速查',
+    href: 'https://github.com/ZhuLinsen/daily_stock_analysis/blob/main/docs/llm-providers.md',
+  },
+];
+
+function HelpLabel({
+  htmlFor,
+  label,
+  fieldKey,
+  helpKey,
+  examples,
+  compact = false,
+}: {
+  htmlFor?: string;
+  label: string;
+  fieldKey: string;
+  helpKey: string;
+  examples?: string[];
+  compact?: boolean;
+}) {
+  return (
+    <div className={compact ? 'mb-1 flex items-center gap-1.5' : 'mb-2 flex items-center gap-1.5'}>
+      <label
+        htmlFor={htmlFor}
+        className={compact ? 'text-xs text-muted-text' : 'text-sm font-medium text-foreground'}
+      >
+        {label}
+      </label>
+      <SettingsHelpButton
+        fieldKey={fieldKey}
+        title={label}
+        helpKey={helpKey}
+        examples={examples}
+        docs={LLM_CHANNEL_HELP_DOCS}
+      />
+    </div>
+  );
+}
+
+function parseChannelFieldKeys(channel: ChannelConfig): string[] {
+  const upperName = channel.name.trim().toUpperCase();
+  return [
+    `LLM_${upperName}_PROTOCOL`,
+    `LLM_${upperName}_BASE_URL`,
+    `LLM_${upperName}_ENABLED`,
+    `LLM_${upperName}_API_KEY`,
+    `LLM_${upperName}_API_KEYS`,
+    `LLM_${upperName}_MODELS`,
+    `LLM_${upperName}_EXTRA_HEADERS`,
+  ];
+}
+
+function parseChannelFieldKeysFromName(name: string): string[] {
+  const upperName = name.trim().toUpperCase();
+  return CHANNEL_FIELD_SUFFIXES.map((suffix) => `LLM_${upperName}_${suffix}`);
+}
+
+function isChannelSecretFieldKey(key: string): boolean {
+  const match = CHANNEL_FIELD_KEY_PATTERN.exec(key.toUpperCase());
+  return match?.[2] === 'API_KEY' || match?.[2] === 'API_KEYS';
+}
+
+function resolveInitialChannelApiKeySource(
+  channelName: string,
+  initialItemValueByKey: Map<string, string>,
+  initialItemSourceByKey: Map<string, boolean>,
+): boolean | undefined {
+  const upperName = channelName.trim().toUpperCase();
+  const apiKeysKey = `LLM_${upperName}_API_KEYS`;
+  const apiKeyKey = `LLM_${upperName}_API_KEY`;
+
+  const apiKeysValue = (initialItemValueByKey.get(apiKeysKey) || '').trim();
+  const apiKeyValue = (initialItemValueByKey.get(apiKeyKey) || '').trim();
+
+  if (channelName.trim().toLowerCase() === HERMES_CHANNEL_NAME && apiKeyValue && initialItemSourceByKey.has(apiKeyKey)) {
+    return initialItemSourceByKey.get(apiKeyKey);
+  }
+  if (apiKeysValue && initialItemSourceByKey.has(apiKeysKey)) {
+    return initialItemSourceByKey.get(apiKeysKey);
+  }
+  if (apiKeyValue && initialItemSourceByKey.has(apiKeyKey)) {
+    return initialItemSourceByKey.get(apiKeyKey);
+  }
+
+  if (apiKeyValue) {
+    return initialItemSourceByKey.get(apiKeyKey);
+  }
+  if (apiKeysValue) {
+    return initialItemSourceByKey.get(apiKeysKey);
+  }
+  return initialItemSourceByKey.get(apiKeysKey) ?? initialItemSourceByKey.get(apiKeyKey);
+}
+
+function resolveInitialChannelApiKeyValue(
+  channelName: string,
+  itemValueByKey: Map<string, string>,
+  itemSourceByKey: Map<string, boolean>,
+): string {
+  const upperName = channelName.trim().toUpperCase();
+  const apiKeysKey = `LLM_${upperName}_API_KEYS`;
+  const apiKeyKey = `LLM_${upperName}_API_KEY`;
+
+  const apiKeysValue = (itemValueByKey.get(apiKeysKey) || '').trim();
+  const apiKeyValue = (itemValueByKey.get(apiKeyKey) || '').trim();
+
+  if (channelName.trim().toLowerCase() === HERMES_CHANNEL_NAME && apiKeyValue) {
+    return apiKeyValue;
+  }
+  if (apiKeysValue && itemSourceByKey.has(apiKeysKey)) {
+    return apiKeysValue;
+  }
+  if (apiKeyValue && itemSourceByKey.has(apiKeyKey)) {
+    return apiKeyValue;
+  }
+  if (apiKeysValue) {
+    return apiKeysValue;
+  }
+  if (apiKeyValue) {
+    return apiKeyValue;
+  }
+  return itemValueByKey.get(apiKeysKey) || itemValueByKey.get(apiKeyKey) || '';
+}
+
+function buildChangedItemKeys(
+  channels: ChannelConfig[],
+  initialChannels: ChannelConfig[],
+  initialItemSourceByKey: Map<string, boolean>,
+  initialItemValueByKey: Map<string, string>,
+): Set<string> {
+  const changedKeys = new Set<string>();
+  const nextChannelNames = channels.map((channel) => channel.name.trim().toLowerCase()).join(',');
+  const previousChannelNames = initialChannels.map((channel) => channel.name.trim().toLowerCase()).join(',');
+
+  if (nextChannelNames !== previousChannelNames) {
+    changedKeys.add('LLM_CHANNELS');
+  }
+
+  const maxLength = Math.max(channels.length, initialChannels.length);
+  for (let index = 0; index < maxLength; index += 1) {
+    const current = channels[index];
+    const previous = initialChannels[index];
+    if (!current && !previous) {
+      continue;
+    }
+
+    if (!current) {
+      const previousKeys = parseChannelFieldKeys(previous);
+      for (const key of previousKeys) {
+        if (initialItemSourceByKey.get(key.toUpperCase()) !== false) {
+          changedKeys.add(key);
+        }
+      }
+      continue;
+    }
+
+    if (!previous) {
+      for (const key of parseChannelFieldKeys(current)) {
+        changedKeys.add(key);
+      }
+      continue;
+    }
+
+    const currentName = current.name.trim().toUpperCase();
+    const previousName = previous.name.trim().toUpperCase();
+    if (currentName !== previousName) {
+      const previousApiKeySource = resolveInitialChannelApiKeySource(
+        previous.name,
+        initialItemValueByKey,
+        initialItemSourceByKey,
+      );
+      const preserveRuntimeOnlySecret = previousApiKeySource === false && current.apiKey === previous.apiKey;
+      const previousKeys = parseChannelFieldKeys(previous);
+      for (const key of previousKeys) {
+        if (initialItemSourceByKey.get(key.toUpperCase()) !== false) {
+          changedKeys.add(key);
+        }
+      }
+
+      for (const key of parseChannelFieldKeys(current)) {
+        if (preserveRuntimeOnlySecret && isChannelSecretFieldKey(key)) {
+          continue;
+        }
+        changedKeys.add(key);
+      }
+      continue;
+    }
+
+    const prefix = `LLM_${currentName}`;
+    if (current.protocol !== previous.protocol) {
+      changedKeys.add(`${prefix}_PROTOCOL`);
+    }
+    if (current.baseUrl !== previous.baseUrl) {
+      changedKeys.add(`${prefix}_BASE_URL`);
+    }
+    if (current.enabled !== previous.enabled) {
+      changedKeys.add(`${prefix}_ENABLED`);
+    }
+    if (current.apiKey !== previous.apiKey) {
+      changedKeys.add(`${prefix}_API_KEY`);
+      changedKeys.add(`${prefix}_API_KEYS`);
+    }
+    if (current.models !== previous.models) {
+      changedKeys.add(`${prefix}_MODELS`);
+    }
+  }
+
+  return changedKeys;
 }
 
 const ChannelRow: React.FC<ChannelRowProps> = ({
@@ -153,6 +422,9 @@ const ChannelRow: React.FC<ChannelRowProps> = ({
   const providerSources = showProviderTemplateDetails ? (preset?.officialSources || []) : [];
   const providerHint = showProviderTemplateDetails ? preset?.configHint : undefined;
   const selectedModels = splitModels(channel.models);
+  const runtimeCapabilityOptions = isHermesChannel(channel)
+    ? RUNTIME_CAPABILITY_OPTIONS.filter((option) => option.value === 'json')
+    : RUNTIME_CAPABILITY_OPTIONS;
   const discoveredModels = discoveryState?.models || [];
   const manualOnlyModels = selectedModels.filter(
     (model) => !discoveredModels.some((discoveredModel) => areModelsEquivalent(model, discoveredModel, channel.protocol)),
@@ -169,6 +441,11 @@ const ChannelRow: React.FC<ChannelRowProps> = ({
   const selectedCapabilities = capabilityState?.selected || [];
   const capabilityResults = capabilityState?.results || {};
   const capabilityBusy = capabilityState?.status === 'loading';
+  const channelNameInputId = `llm-channel-${channel.id}-name`;
+  const protocolInputId = `llm-channel-${channel.id}-protocol`;
+  const baseUrlInputId = `llm-channel-${channel.id}-base-url`;
+  const apiKeyInputId = `llm-channel-${channel.id}-api-key`;
+  const modelsInputId = `llm-channel-${channel.id}-models`;
 
   return (
     <div className="mb-2 overflow-hidden rounded-xl border border-[var(--settings-border)] bg-[var(--settings-surface)] shadow-soft-card transition-[background-color,border-color,box-shadow] duration-200 hover:border-[var(--settings-border-strong)] hover:bg-[var(--settings-surface-hover)]">
@@ -259,16 +536,32 @@ const ChannelRow: React.FC<ChannelRowProps> = ({
       {expanded ? (
         <div className="settings-surface-overlay-soft space-y-4 px-4 py-4">
           <div className="grid gap-2 sm:grid-cols-2">
+            <div>
+              <HelpLabel
+                htmlFor={channelNameInputId}
+                label="渠道名称"
+                fieldKey="LLM_CHANNEL_NAME"
+                helpKey="settings.llm_channel.channel_name"
+                examples={['LLM_CHANNELS=deepseek,aihubmix', 'LLM_DEEPSEEK_MODELS=deepseek-v4-flash,deepseek-v4-pro']}
+              />
             <Input
-              label="渠道名称"
+              id={channelNameInputId}
               value={channel.name}
               disabled={busy}
               onChange={(e) => onUpdate(index, 'name', e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, ''))}
               placeholder="primary"
             />
+            </div>
             <div className="space-y-2">
-              <label className="block text-sm font-medium text-foreground">协议</label>
+              <HelpLabel
+                htmlFor={protocolInputId}
+                label="协议"
+                fieldKey="LLM_CHANNEL_PROTOCOL"
+                helpKey="settings.llm_channel.protocol"
+                examples={['LLM_DEEPSEEK_PROTOCOL=deepseek', 'LLM_OPENROUTER_PROTOCOL=openai']}
+              />
               <Select
+                id={protocolInputId}
                 value={channel.protocol}
                 onChange={(v) => onUpdate(index, 'protocol', normalizeProtocol(v))}
                 options={PROTOCOL_OPTIONS}
@@ -278,8 +571,16 @@ const ChannelRow: React.FC<ChannelRowProps> = ({
             </div>
           </div>
 
+          <div>
+            <HelpLabel
+              htmlFor={baseUrlInputId}
+              label="Base URL"
+              fieldKey="LLM_CHANNEL_BASE_URL"
+              helpKey="settings.llm_channel.base_url"
+              examples={['LLM_DEEPSEEK_BASE_URL=https://api.deepseek.com', 'LLM_OPENROUTER_BASE_URL=https://openrouter.ai/api/v1']}
+            />
           <Input
-            label="Base URL"
+            id={baseUrlInputId}
             value={channel.baseUrl}
             disabled={busy}
             onChange={(e) => onUpdate(index, 'baseUrl', e.target.value)}
@@ -289,6 +590,7 @@ const ChannelRow: React.FC<ChannelRowProps> = ({
                 : preset?.baseUrl || 'https://api.example.com/v1'
             }
           />
+          </div>
 
           {showProviderTemplateDetails ? (
             <div className="space-y-2 rounded-xl border border-[var(--settings-border)] bg-[var(--settings-surface-hover)] p-3">
@@ -332,8 +634,16 @@ const ChannelRow: React.FC<ChannelRowProps> = ({
             </div>
           ) : null}
 
+          <div>
+            <HelpLabel
+              htmlFor={apiKeyInputId}
+              label="API Key"
+              fieldKey="LLM_CHANNEL_API_KEY"
+              helpKey="settings.llm_channel.api_key"
+              examples={['LLM_DEEPSEEK_API_KEY=sk-xxxx', 'LLM_OPENAI_API_KEYS=sk-key-1,sk-key-2']}
+            />
           <Input
-            label="API Key"
+            id={apiKeyInputId}
             type="password"
             allowTogglePassword
             iconType="key"
@@ -344,6 +654,7 @@ const ChannelRow: React.FC<ChannelRowProps> = ({
             onChange={(e) => onUpdate(index, 'apiKey', e.target.value)}
             placeholder={channel.protocol === 'ollama' ? '本地 Ollama 可留空' : '支持多个 Key 逗号分隔'}
           />
+          </div>
 
           <div className="space-y-3 rounded-xl border border-[var(--settings-border)] bg-[var(--settings-surface-hover)] p-3">
             <div className="flex flex-wrap items-center gap-2">
@@ -376,7 +687,12 @@ const ChannelRow: React.FC<ChannelRowProps> = ({
 
             {discoveredModels.length > 0 ? (
               <div>
-                <label className="mb-2 block text-sm font-medium text-foreground">可选模型（可多选）</label>
+                <HelpLabel
+                  label="可选模型（可多选）"
+                  fieldKey="LLM_CHANNEL_DISCOVERED_MODELS"
+                  helpKey="settings.llm_channel.models"
+                  examples={['LLM_DEEPSEEK_MODELS=deepseek-v4-flash,deepseek-v4-pro']}
+                />
                 <div className="max-h-48 space-y-2 overflow-y-auto rounded-xl border border-[var(--settings-border)] bg-[var(--settings-surface)] p-3">
                   {discoveredModels.map((model) => (
                     <label key={model} className="flex items-center gap-2 text-sm text-secondary-text">
@@ -396,8 +712,16 @@ const ChannelRow: React.FC<ChannelRowProps> = ({
               </div>
             ) : null}
 
+            <div>
+              <HelpLabel
+                htmlFor={modelsInputId}
+                label={discoveredModels.length > 0 ? '手动模型（逗号分隔）' : '模型（逗号分隔）'}
+                fieldKey="LLM_CHANNEL_MODELS"
+                helpKey="settings.llm_channel.models"
+                examples={['LLM_DEEPSEEK_MODELS=deepseek-v4-flash,deepseek-v4-pro', 'LLM_OLLAMA_MODELS=qwen3:8b,llama3.1:8b']}
+              />
             <Input
-              label={discoveredModels.length > 0 ? '手动模型（逗号分隔）' : '模型（逗号分隔）'}
+              id={modelsInputId}
               value={channel.models}
               disabled={busy}
               onChange={(e) => onUpdate(index, 'models', e.target.value)}
@@ -408,6 +732,7 @@ const ChannelRow: React.FC<ChannelRowProps> = ({
                   : '若渠道不支持自动发现或请求失败，可直接手动填写模型列表。'
               }
             />
+            </div>
 
             {manualOnlyModels.length > 0 ? (
               <p className="text-[11px] text-secondary-text">
@@ -456,7 +781,16 @@ const ChannelRow: React.FC<ChannelRowProps> = ({
           <div className="space-y-3 rounded-xl border border-[var(--settings-border)] bg-[var(--settings-surface-hover)] p-3">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div>
-                <p className="text-[11px] font-medium text-muted-text">运行时能力检测（可选）</p>
+                <div className="flex items-center gap-1.5">
+                  <p className="text-[11px] font-medium text-muted-text">运行时能力检测（可选）</p>
+                  <SettingsHelpButton
+                    fieldKey="LLM_CHANNEL_CAPABILITY_CHECKS"
+                    title="运行时能力检测"
+                    helpKey="settings.llm_channel.capability_checks"
+                    examples={['JSON / Tools / Stream / Vision']}
+                    docs={LLM_CHANNEL_HELP_DOCS}
+                  />
+                </div>
                 <p className="mt-0.5 text-[11px] text-secondary-text">
                   仅在手动触发时发起真实 LLM 请求；多选可能需要 20-40 秒。
                 </p>
@@ -474,7 +808,7 @@ const ChannelRow: React.FC<ChannelRowProps> = ({
             </div>
 
             <div className="flex flex-wrap gap-2">
-              {RUNTIME_CAPABILITY_OPTIONS.map((option) => (
+              {runtimeCapabilityOptions.map((option) => (
                 <Tooltip key={option.value} content={option.hint}>
                   <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-[var(--settings-border)] bg-[var(--settings-surface)] px-2 py-1 text-[11px] text-secondary-text">
                     <input
@@ -683,6 +1017,44 @@ function resolveModelPreview(models: string, protocol: ChannelProtocol): string[
   return splitModels(models).map((model) => normalizeModelForRuntime(model, protocol));
 }
 
+interface RouteProvenance {
+  routeName: string;
+  hasHermes: boolean;
+  hasNonHermes: boolean;
+}
+
+function resolveChannelRouteModels(channel: ChannelConfig): string[] {
+  if (isHermesChannel(channel)) {
+    const models = splitModels(channel.models);
+    return (models.length > 0 ? models : [HERMES_DEFAULT_MODEL]).map(canonicalizeHermesRouteModel);
+  }
+  return resolveModelPreview(channel.models, channel.protocol);
+}
+
+function buildRouteProvenanceMap(channels: ChannelConfig[]): Map<string, RouteProvenance> {
+  const provenance = new Map<string, RouteProvenance>();
+  for (const channel of channels) {
+    if (!channel.enabled || !channel.name.trim()) {
+      continue;
+    }
+    const hermes = isHermesChannel(channel);
+    for (const routeName of resolveChannelRouteModels(channel)) {
+      if (!routeName) continue;
+      const existing = provenance.get(routeName) || {
+        routeName,
+        hasHermes: false,
+        hasNonHermes: false,
+      };
+      provenance.set(routeName, {
+        ...existing,
+        hasHermes: existing.hasHermes || hermes,
+        hasNonHermes: existing.hasNonHermes || !hermes,
+      });
+    }
+  }
+  return provenance;
+}
+
 function buildModelOptions(models: string[], selectedModel: string, autoLabel: string): Array<{ value: string; label: string }> {
   const options: Array<{ value: string; label: string }> = [{ value: '', label: autoLabel }];
   if (selectedModel && !models.includes(selectedModel)) {
@@ -863,26 +1235,43 @@ function hasLegacyRuntimeSource(model: string, itemMap: Map<string, string>): bo
 }
 
 function isRuntimeModelAvailable(model: string, availableModels: string[], itemMap: Map<string, string>): boolean {
-  return availableModels.includes(model)
+  const normalizedModel = model.trim();
+  const matchesAvailableModel = normalizedModel.length > 0 && availableModels.includes(normalizedModel);
+  return matchesAvailableModel
     || usesDirectEnvProvider(model)
     || (availableModels.length === 0 && hasLegacyRuntimeSource(model, itemMap));
 }
 
+function hasCanonicalRouteAliasMismatch(model: string, availableModels: string[]): boolean {
+  const normalizedModel = model.trim();
+  if (!normalizedModel || availableModels.includes(normalizedModel) || usesDirectEnvProvider(normalizedModel)) {
+    return false;
+  }
+  for (const candidate of routeIdentityCandidates(normalizedModel)) {
+    if (candidate !== normalizedModel && availableModels.includes(candidate)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function sanitizeRuntimeConfigForSave(
   runtimeConfig: RuntimeConfig,
-  availableModels: string[],
+  generationModels: string[],
+  agentSafeModels: string[],
+  visionSafeModels: string[],
   itemMap: Map<string, string>,
 ): RuntimeConfig {
-  const primaryModel = runtimeConfig.primaryModel && !isRuntimeModelAvailable(runtimeConfig.primaryModel, availableModels, itemMap)
+  const primaryModel = runtimeConfig.primaryModel && !isRuntimeModelAvailable(runtimeConfig.primaryModel, generationModels, itemMap)
     ? ''
     : runtimeConfig.primaryModel;
-  const agentPrimaryModel = runtimeConfig.agentPrimaryModel && !isRuntimeModelAvailable(runtimeConfig.agentPrimaryModel, availableModels, itemMap)
+  const agentPrimaryModel = runtimeConfig.agentPrimaryModel && !isRuntimeModelAvailable(runtimeConfig.agentPrimaryModel, agentSafeModels, itemMap)
     ? ''
     : runtimeConfig.agentPrimaryModel;
-  const visionModel = runtimeConfig.visionModel && !isRuntimeModelAvailable(runtimeConfig.visionModel, availableModels, itemMap)
+  const visionModel = runtimeConfig.visionModel && !isRuntimeModelAvailable(runtimeConfig.visionModel, visionSafeModels, itemMap)
     ? ''
     : runtimeConfig.visionModel;
-  const fallbackModels = runtimeConfig.fallbackModels.filter((model) => isRuntimeModelAvailable(model, availableModels, itemMap));
+  const fallbackModels = runtimeConfig.fallbackModels.filter((model) => isRuntimeModelAvailable(model, generationModels, itemMap));
 
   return {
     ...runtimeConfig,
@@ -899,6 +1288,26 @@ function runtimeConfigsAreEqual(left: RuntimeConfig, right: RuntimeConfig): bool
     && left.visionModel === right.visionModel
     && left.temperature === right.temperature
     && left.fallbackModels.join(',') === right.fallbackModels.join(',');
+}
+
+function runtimeConfigChangedKeys(left: RuntimeConfig, right: RuntimeConfig): Set<string> {
+  const changed = new Set<string>();
+  if (left.primaryModel !== right.primaryModel) {
+    changed.add('LITELLM_MODEL');
+  }
+  if (left.agentPrimaryModel !== right.agentPrimaryModel) {
+    changed.add('AGENT_LITELLM_MODEL');
+  }
+  if (left.fallbackModels.join(',') !== right.fallbackModels.join(',')) {
+    changed.add('LITELLM_FALLBACK_MODELS');
+  }
+  if (left.temperature !== right.temperature) {
+    changed.add('LLM_TEMPERATURE');
+  }
+  if (left.visionModel !== right.visionModel) {
+    changed.add('VISION_MODEL');
+  }
+  return changed;
 }
 
 function resolveTemperatureFromItems(itemMap: Map<string, string>): string {
@@ -950,8 +1359,11 @@ function parseRuntimeConfigFromItems(items: Array<{ key: string; value: string }
   };
 }
 
-function parseChannelsFromItems(items: Array<{ key: string; value: string }>): ChannelConfig[] {
-  const itemMap = new Map(items.map((item) => [item.key, item.value]));
+function parseChannelsFromItems(
+  items: Array<{ key: string; value: string }>,
+  itemSourceByKey: Map<string, boolean> = new Map(),
+): ChannelConfig[] {
+  const itemMap = new Map(items.map((item) => [item.key.toUpperCase(), item.value]));
   const channelNames = (itemMap.get('LLM_CHANNELS') || '')
     .split(',')
     .map((segment) => segment.trim())
@@ -968,7 +1380,7 @@ function parseChannelsFromItems(items: Array<{ key: string; value: string }>): C
       name: name.toLowerCase(),
       protocol: inferProtocol(itemMap.get(`LLM_${upperName}_PROTOCOL`) || '', baseUrl, models),
       baseUrl,
-      apiKey: itemMap.get(`LLM_${upperName}_API_KEYS`) || itemMap.get(`LLM_${upperName}_API_KEY`) || '',
+      apiKey: resolveInitialChannelApiKeyValue(name, itemMap, itemSourceByKey),
       models: rawModels,
       enabled: parseEnabled(itemMap.get(`LLM_${upperName}_ENABLED`)),
     };
@@ -999,8 +1411,14 @@ function channelsToUpdateItems(
     updates.push({ key: `${prefix}_PROTOCOL`, value: channel.protocol });
     updates.push({ key: `${prefix}_BASE_URL`, value: channel.baseUrl });
     updates.push({ key: `${prefix}_ENABLED`, value: channel.enabled ? 'true' : 'false' });
-    updates.push({ key: `${prefix}_API_KEY${isMultiKey ? 'S' : ''}`, value: channel.apiKey });
-    updates.push({ key: `${prefix}_API_KEY${isMultiKey ? '' : 'S'}`, value: '' });
+    if (isHermesChannel(channel)) {
+      updates.push({ key: `${prefix}_API_KEY`, value: channel.apiKey });
+      updates.push({ key: `${prefix}_API_KEYS`, value: '' });
+      updates.push({ key: `${prefix}_EXTRA_HEADERS`, value: '' });
+    } else {
+      updates.push({ key: `${prefix}_API_KEY${isMultiKey ? 'S' : ''}`, value: channel.apiKey });
+      updates.push({ key: `${prefix}_API_KEY${isMultiKey ? '' : 'S'}`, value: '' });
+    }
     updates.push({ key: `${prefix}_MODELS`, value: channel.models });
   }
 
@@ -1023,6 +1441,82 @@ function channelsToUpdateItems(
   return updates;
 }
 
+function channelNamesAreSafe(channels: ChannelConfig[]): boolean {
+  return channels.every((channel) => /^[a-z0-9_]+$/.test(channel.name.trim()));
+}
+
+function buildFilteredChannelUpdateItems({
+  channels,
+  initialChannels,
+  initialNames,
+  initialItemSourceByKey,
+  savedItemMap,
+  runtimeConfig,
+  initialRuntimeConfig,
+  managesRuntimeConfig,
+}: {
+  channels: ChannelConfig[];
+  initialChannels: ChannelConfig[];
+  initialNames: string[];
+  initialItemSourceByKey: Map<string, boolean>;
+  savedItemMap: Map<string, string>;
+  runtimeConfig: RuntimeConfig;
+  initialRuntimeConfig: RuntimeConfig;
+  managesRuntimeConfig: boolean;
+}): Array<{ key: string; value: string }> {
+  const changedKeys = new Set<string>([
+    ...buildChangedItemKeys(channels, initialChannels, initialItemSourceByKey, savedItemMap),
+    ...runtimeConfigChangedKeys(runtimeConfig, initialRuntimeConfig),
+  ]);
+  return channelsToUpdateItems(channels, initialNames, runtimeConfig, managesRuntimeConfig).filter((item) => {
+    const itemKey = item.key.toUpperCase();
+    const initialItemSource = initialItemSourceByKey.get(itemKey);
+    if (initialItemSource === false) {
+      return changedKeys.has(itemKey);
+    }
+    if (isChannelSecretFieldKey(itemKey) && initialItemSource === undefined) {
+      return changedKeys.has(itemKey);
+    }
+    return true;
+  });
+}
+
+function buildChannelDraftItems({
+  hasChanges,
+  channels,
+  initialChannels,
+  initialNames,
+  initialItemSourceByKey,
+  savedItemMap,
+  runtimeConfig,
+  initialRuntimeConfig,
+  managesRuntimeConfig,
+}: {
+  hasChanges: boolean;
+  channels: ChannelConfig[];
+  initialChannels: ChannelConfig[];
+  initialNames: string[];
+  initialItemSourceByKey: Map<string, boolean>;
+  savedItemMap: Map<string, string>;
+  runtimeConfig: RuntimeConfig;
+  initialRuntimeConfig: RuntimeConfig;
+  managesRuntimeConfig: boolean;
+}): Array<{ key: string; value: string }> {
+  if (!hasChanges || !channelNamesAreSafe(channels)) {
+    return [];
+  }
+  return buildFilteredChannelUpdateItems({
+    channels,
+    initialChannels,
+    initialNames,
+    initialItemSourceByKey,
+    savedItemMap,
+    runtimeConfig,
+    initialRuntimeConfig,
+    managesRuntimeConfig,
+  });
+}
+
 function channelsAreEqual(left: ChannelConfig, right: ChannelConfig): boolean {
   return (
     left.name === right.name
@@ -1039,12 +1533,41 @@ export const LLMChannelEditor: React.FC<LLMChannelEditorProps> = ({
   configVersion,
   maskToken,
   onSaved,
+  onDraftItemsChange,
   disabled = false,
 }) => {
-  const initialChannels = useMemo(() => parseChannelsFromItems(items), [items]);
+  const initialItemSourceByKey = useMemo(() => {
+    const sourceByKey = new Map<string, boolean>();
+    for (const item of items) {
+      sourceByKey.set(item.key.toUpperCase(), item.rawValueExists !== false);
+    }
+    for (const [key, hasSource] of sourceByKey) {
+      if (hasSource) {
+        continue;
+      }
+      const match = CHANNEL_FIELD_KEY_PATTERN.exec(key);
+      if (!match) {
+        continue;
+      }
+      const channelName = match[1];
+      for (const channelKey of parseChannelFieldKeysFromName(channelName)) {
+        if (!sourceByKey.has(channelKey)) {
+          sourceByKey.set(channelKey, false);
+        }
+      }
+    }
+    return sourceByKey;
+  }, [items]);
+  const initialChannels = useMemo(
+    () => parseChannelsFromItems(items, initialItemSourceByKey),
+    [items, initialItemSourceByKey],
+  );
   const initialNames = useMemo(() => initialChannels.map((channel) => channel.name), [initialChannels]);
   const initialRuntimeConfig = useMemo(() => parseRuntimeConfigFromItems(items), [items]);
   const savedItemMap = useMemo(() => new Map(items.map((item) => [item.key.toUpperCase(), item.value])), [items]);
+  const hasPersistedHermesSecret = (channel: ChannelConfig): boolean => (
+    isHermesChannel(channel) && initialItemSourceByKey.get('LLM_HERMES_API_KEY') === true
+  );
   const hasLitellmConfig = useMemo(
     () => items.some((item) => item.key === 'LITELLM_CONFIG' && item.value.trim().length > 0),
     [items],
@@ -1072,6 +1595,8 @@ export const LLMChannelEditor: React.FC<LLMChannelEditorProps> = ({
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [addPreset, setAddPreset] = useState('aihubmix');
   const addChannelIdRef = useRef(0);
+  const lastDraftFingerprintRef = useRef<string | null>(null);
+  const onDraftItemsChangeRef = useRef(onDraftItemsChange);
 
   const prevChannelsRef = useRef(channelsFingerprint);
   const prevRuntimeRef = useRef(runtimeFingerprint);
@@ -1107,26 +1632,49 @@ export const LLMChannelEditor: React.FC<LLMChannelEditorProps> = ({
     setIsCollapsed(false);
   }, [channelsFingerprint, runtimeFingerprint, initialChannels, initialRuntimeConfig]);
 
-  const availableModels = useMemo(() => {
+  const routeProvenanceMap = useMemo(() => {
     if (!managesRuntimeConfig) {
-      return [];
+      return new Map<string, RouteProvenance>();
     }
-    const seen = new Set<string>();
-    const models: string[] = [];
-    for (const channel of channels) {
-      if (!channel.enabled || !channel.name.trim()) {
-        continue;
-      }
-      for (const model of resolveModelPreview(channel.models, channel.protocol)) {
-        if (!model || seen.has(model)) {
-          continue;
-        }
-        seen.add(model);
-        models.push(model);
-      }
-    }
-    return models;
+    return buildRouteProvenanceMap(channels);
   }, [channels, managesRuntimeConfig]);
+
+  const availableModels = useMemo(
+    () => Array.from(routeProvenanceMap.values())
+      .filter((origin) => !(origin.hasHermes && origin.hasNonHermes))
+      .map((origin) => origin.routeName),
+    [routeProvenanceMap],
+  );
+
+  const agentSafeModels = useMemo(
+    () => Array.from(routeProvenanceMap.values())
+      .filter((origin) => !origin.hasHermes || origin.hasNonHermes)
+      .map((origin) => origin.routeName),
+    [routeProvenanceMap],
+  );
+
+  const visionSafeModels = useMemo(
+    () => Array.from(routeProvenanceMap.values())
+      .filter((origin) => !origin.hasHermes)
+      .map((origin) => origin.routeName),
+    [routeProvenanceMap],
+  );
+
+  const agentSelectedModelForOptions = useMemo(() => {
+    if (!runtimeConfig.agentPrimaryModel || agentSafeModels.includes(runtimeConfig.agentPrimaryModel)) {
+      return runtimeConfig.agentPrimaryModel;
+    }
+    const origin = getRouteProvenance(routeProvenanceMap, runtimeConfig.agentPrimaryModel);
+    return origin?.hasHermes && !origin.hasNonHermes ? '' : runtimeConfig.agentPrimaryModel;
+  }, [agentSafeModels, routeProvenanceMap, runtimeConfig.agentPrimaryModel]);
+
+  const visionSelectedModelForOptions = useMemo(() => {
+    if (!runtimeConfig.visionModel || visionSafeModels.includes(runtimeConfig.visionModel)) {
+      return runtimeConfig.visionModel;
+    }
+    const origin = getRouteProvenance(routeProvenanceMap, runtimeConfig.visionModel);
+    return origin?.hasHermes ? '' : runtimeConfig.visionModel;
+  }, [routeProvenanceMap, runtimeConfig.visionModel, visionSafeModels]);
 
   const hasChanges = useMemo(() => {
     const runtimeChanged = (
@@ -1142,6 +1690,45 @@ export const LLMChannelEditor: React.FC<LLMChannelEditorProps> = ({
     }
     return channels.some((channel, index) => !channelsAreEqual(channel, initialChannels[index]));
   }, [channels, initialChannels, initialRuntimeConfig, runtimeConfig]);
+
+  const draftItems = useMemo(() => buildChannelDraftItems({
+    hasChanges,
+    channels,
+    initialChannels,
+    initialNames,
+    initialItemSourceByKey,
+    savedItemMap,
+    runtimeConfig,
+    initialRuntimeConfig,
+    managesRuntimeConfig,
+  }), [
+    channels,
+    hasChanges,
+    initialChannels,
+    initialItemSourceByKey,
+    initialNames,
+    initialRuntimeConfig,
+    managesRuntimeConfig,
+    runtimeConfig,
+    savedItemMap,
+  ]);
+  const draftFingerprint = useMemo(() => JSON.stringify(draftItems), [draftItems]);
+
+  useEffect(() => {
+    onDraftItemsChangeRef.current = onDraftItemsChange;
+  }, [onDraftItemsChange]);
+
+  useEffect(() => {
+    if (!onDraftItemsChange || lastDraftFingerprintRef.current === draftFingerprint) {
+      return;
+    }
+    lastDraftFingerprintRef.current = draftFingerprint;
+    onDraftItemsChange(draftItems);
+  }, [draftFingerprint, draftItems, onDraftItemsChange]);
+
+  useEffect(() => () => {
+    onDraftItemsChangeRef.current?.([]);
+  }, []);
 
   const busy = disabled || isSaving;
 
@@ -1282,8 +1869,33 @@ export const LLMChannelEditor: React.FC<LLMChannelEditorProps> = ({
       return;
     }
 
+    if (managesRuntimeConfig) {
+      const mixedPrimary = runtimeConfig.primaryModel
+        && getRouteProvenance(routeProvenanceMap, runtimeConfig.primaryModel)?.hasHermes
+        && getRouteProvenance(routeProvenanceMap, runtimeConfig.primaryModel)?.hasNonHermes;
+      const mixedFallback = runtimeConfig.fallbackModels.find((model) => {
+        const origin = getRouteProvenance(routeProvenanceMap, model);
+        return origin?.hasHermes && origin.hasNonHermes;
+      });
+      if (mixedPrimary || mixedFallback) {
+        setSaveMessage({ type: 'local-error', text: 'Mixed Hermes/non-Hermes route 暂不支持作为主生成或备选模型，请选择纯 Hermes 或纯非 Hermes route。' });
+        return;
+      }
+
+      const nonCanonicalRouteAlias = (
+        hasCanonicalRouteAliasMismatch(runtimeConfig.primaryModel, availableModels)
+        || hasCanonicalRouteAliasMismatch(runtimeConfig.agentPrimaryModel, agentSafeModels)
+        || hasCanonicalRouteAliasMismatch(runtimeConfig.visionModel, visionSafeModels)
+        || runtimeConfig.fallbackModels.some((model) => hasCanonicalRouteAliasMismatch(model, availableModels))
+      );
+      if (nonCanonicalRouteAlias) {
+        setSaveMessage({ type: 'local-error', text: '当前运行时模型使用非规范 route alias，请从下拉框重新选择规范模型。' });
+        return;
+      }
+    }
+
     const runtimeConfigForSave = managesRuntimeConfig
-      ? sanitizeRuntimeConfigForSave(runtimeConfig, availableModels, savedItemMap)
+      ? sanitizeRuntimeConfigForSave(runtimeConfig, availableModels, agentSafeModels, visionSafeModels, savedItemMap)
       : runtimeConfig;
     if (!runtimeConfigsAreEqual(runtimeConfigForSave, runtimeConfig)) {
       setRuntimeConfig(runtimeConfigForSave);
@@ -1298,9 +1910,9 @@ export const LLMChannelEditor: React.FC<LLMChannelEditorProps> = ({
       }
 
       const invalidAgentPrimaryModel = runtimeConfigForSave.agentPrimaryModel
-        && !isRuntimeModelAvailable(runtimeConfigForSave.agentPrimaryModel, availableModels, savedItemMap);
+        && !isRuntimeModelAvailable(runtimeConfigForSave.agentPrimaryModel, agentSafeModels, savedItemMap);
       if (invalidAgentPrimaryModel) {
-        setSaveMessage({ type: 'local-error', text: '当前 Agent 主模型不在已启用渠道的模型列表中，请重新选择。' });
+        setSaveMessage({ type: 'local-error', text: '当前 Agent 主模型没有 Agent-safe 非 Hermes deployment，请重新选择。' });
         return;
       }
 
@@ -1313,9 +1925,9 @@ export const LLMChannelEditor: React.FC<LLMChannelEditorProps> = ({
       }
 
       const invalidVisionModel = runtimeConfigForSave.visionModel
-        && !isRuntimeModelAvailable(runtimeConfigForSave.visionModel, availableModels, savedItemMap);
+        && !isRuntimeModelAvailable(runtimeConfigForSave.visionModel, visionSafeModels, savedItemMap);
       if (invalidVisionModel) {
-        setSaveMessage({ type: 'local-error', text: '当前 Vision 模型不在已启用渠道的模型列表中，请重新选择。' });
+        setSaveMessage({ type: 'local-error', text: '当前 Vision 模型不能包含 Hermes deployment，请重新选择纯非 Hermes route。' });
         return;
       }
     }
@@ -1325,7 +1937,16 @@ export const LLMChannelEditor: React.FC<LLMChannelEditorProps> = ({
     setSaveWarnings([]);
 
     try {
-      const updateItems = channelsToUpdateItems(channels, initialNames, runtimeConfigForSave, managesRuntimeConfig);
+      const updateItems = buildFilteredChannelUpdateItems({
+        channels,
+        initialChannels,
+        initialNames,
+        initialItemSourceByKey,
+        savedItemMap,
+        runtimeConfig: runtimeConfigForSave,
+        initialRuntimeConfig,
+        managesRuntimeConfig,
+      });
       const response = await systemConfigApi.update({
         configVersion,
         maskToken,
@@ -1349,6 +1970,14 @@ export const LLMChannelEditor: React.FC<LLMChannelEditorProps> = ({
   };
 
   const handleTest = async (channel: ChannelConfig, index: number) => {
+    if (hasRuntimeOnlyMaskedHermesSecret(channel, maskToken, hasPersistedHermesSecret(channel))) {
+      setTestStates((previous) => ({
+        ...previous,
+        [index]: { status: 'error', text: RUNTIME_ONLY_HERMES_SECRET_MESSAGE },
+      }));
+      return;
+    }
+
     setTestStates((previous) => ({
       ...previous,
       [index]: { status: 'loading', text: '测试中...' },
@@ -1362,6 +1991,7 @@ export const LLMChannelEditor: React.FC<LLMChannelEditorProps> = ({
         apiKey: channel.apiKey,
         models: splitModels(channel.models),
         enabled: channel.enabled,
+        useSavedSecret: shouldUseSavedHermesSecret(channel, maskToken, hasPersistedHermesSecret(channel)),
       });
 
       const text = result.success
@@ -1387,6 +2017,19 @@ export const LLMChannelEditor: React.FC<LLMChannelEditorProps> = ({
   };
 
   const handleDiscoverModels = async (channel: ChannelConfig) => {
+    if (hasRuntimeOnlyMaskedHermesSecret(channel, maskToken, hasPersistedHermesSecret(channel))) {
+      setDiscoveryStates((previous) => ({
+        ...previous,
+        [channel.id]: {
+          status: 'error',
+          text: RUNTIME_ONLY_HERMES_SECRET_MESSAGE,
+          hint: undefined,
+          models: previous[channel.id]?.models || [],
+        },
+      }));
+      return;
+    }
+
     const requestId = discoveryRequestIdRef.current + 1;
     discoveryRequestIdRef.current = requestId;
     discoveryNonceRef.current[channel.id] = requestId;
@@ -1409,6 +2052,7 @@ export const LLMChannelEditor: React.FC<LLMChannelEditorProps> = ({
         baseUrl: channel.baseUrl,
         apiKey: channel.apiKey,
         models: splitModels(channel.models),
+        useSavedSecret: shouldUseSavedHermesSecret(channel, maskToken, hasPersistedHermesSecret(channel)),
       });
 
       if (discoveryNonceRef.current[channel.id] !== nonce) return;
@@ -1461,8 +2105,24 @@ export const LLMChannelEditor: React.FC<LLMChannelEditorProps> = ({
   };
 
   const handleCapabilityCheck = async (channel: ChannelConfig) => {
-    const selected = capabilityStates[channel.id]?.selected || [];
+    const selected = (capabilityStates[channel.id]?.selected || []).filter(
+      (capability) => !isHermesChannel(channel) || capability === 'json',
+    );
     if (selected.length === 0) return;
+
+    if (hasRuntimeOnlyMaskedHermesSecret(channel, maskToken, hasPersistedHermesSecret(channel))) {
+      setCapabilityStates((previous) => ({
+        ...previous,
+        [channel.id]: {
+          selected,
+          status: 'error',
+          text: RUNTIME_ONLY_HERMES_SECRET_MESSAGE,
+          hint: undefined,
+          results: {},
+        },
+      }));
+      return;
+    }
 
     const requestId = capabilityRequestIdRef.current + 1;
     capabilityRequestIdRef.current = requestId;
@@ -1489,6 +2149,7 @@ export const LLMChannelEditor: React.FC<LLMChannelEditorProps> = ({
         models: splitModels(channel.models),
         enabled: channel.enabled,
         capabilityChecks: selected,
+        useSavedSecret: shouldUseSavedHermesSecret(channel, maskToken, hasPersistedHermesSecret(channel)),
       });
 
       if (capabilityNonceRef.current[channel.id] !== nonce) return;
@@ -1649,7 +2310,13 @@ export const LLMChannelEditor: React.FC<LLMChannelEditorProps> = ({
                 <Badge variant="default" className="border-[var(--settings-border)] bg-[var(--settings-surface-hover)] text-muted-text">Runtime</Badge>
               </div>
               <div className="mb-4">
-                <label className="mb-1 block text-xs text-muted-text">Temperature</label>
+                <HelpLabel
+                  label="Temperature"
+                  fieldKey="LLM_TEMPERATURE"
+                  helpKey="settings.llm_channel.temperature"
+                  examples={['LLM_TEMPERATURE=0.2', 'LLM_TEMPERATURE=0.7']}
+                  compact
+                />
                 <div className="flex items-center gap-3">
                   <input
                     type="range"
@@ -1675,7 +2342,14 @@ export const LLMChannelEditor: React.FC<LLMChannelEditorProps> = ({
               ) : (
                 <div className="space-y-4">
                   <div>
-                    <label htmlFor="runtime-primary-model" className="mb-1 block text-xs text-muted-text">主模型</label>
+                    <HelpLabel
+                      htmlFor="runtime-primary-model"
+                      label="主模型"
+                      fieldKey="LITELLM_MODEL"
+                      helpKey="settings.llm_channel.primary_model"
+                      examples={['LITELLM_MODEL=deepseek/deepseek-v4-flash']}
+                      compact
+                    />
                     <Select
                       id="runtime-primary-model"
                       value={runtimeConfig.primaryModel}
@@ -1687,7 +2361,14 @@ export const LLMChannelEditor: React.FC<LLMChannelEditorProps> = ({
                   </div>
 
                   <div>
-                    <label htmlFor="runtime-agent-primary-model" className="mb-1 block text-xs text-muted-text">Agent 主模型</label>
+                    <HelpLabel
+                      htmlFor="runtime-agent-primary-model"
+                      label="Agent 主模型"
+                      fieldKey="AGENT_LITELLM_MODEL"
+                      helpKey="settings.llm_channel.agent_primary_model"
+                      examples={['AGENT_LITELLM_MODEL=deepseek/deepseek-v4-pro']}
+                      compact
+                    />
                     <Select
                       id="runtime-agent-primary-model"
                       value={runtimeConfig.agentPrimaryModel}
@@ -1695,14 +2376,24 @@ export const LLMChannelEditor: React.FC<LLMChannelEditorProps> = ({
                         ...previous,
                         agentPrimaryModel: normalizeAgentPrimaryModel(value),
                       }))}
-                      options={buildModelOptions(availableModels, runtimeConfig.agentPrimaryModel, '自动（继承普通分析主模型）')}
+                      options={buildModelOptions(
+                        agentSafeModels,
+                        agentSelectedModelForOptions,
+                        '自动（继承普通分析主模型）',
+                      )}
                       disabled={busy}
                       placeholder=""
                     />
                   </div>
 
                   <div>
-                    <label className="mb-2 block text-xs text-muted-text">备选模型</label>
+                    <HelpLabel
+                      label="备选模型"
+                      fieldKey="LITELLM_FALLBACK_MODELS"
+                      helpKey="settings.llm_channel.fallback_models"
+                      examples={['LITELLM_FALLBACK_MODELS=deepseek/deepseek-v4-pro,gemini/gemini-3-flash-preview']}
+                      compact
+                    />
                     <div className="space-y-2 rounded-xl border settings-border-strong settings-surface-overlay-soft p-3">
                       {availableModels.map((model) => (
                         <label key={model} className="flex items-center gap-2 text-sm text-secondary-text">
@@ -1723,12 +2414,23 @@ export const LLMChannelEditor: React.FC<LLMChannelEditorProps> = ({
                   </div>
 
                   <div>
-                    <label htmlFor="runtime-vision-model" className="mb-1 block text-xs text-muted-text">Vision 模型</label>
+                    <HelpLabel
+                      htmlFor="runtime-vision-model"
+                      label="Vision 模型"
+                      fieldKey="VISION_MODEL"
+                      helpKey="settings.llm_channel.vision_model"
+                      examples={['VISION_MODEL=gemini/gemini-3.1-pro-preview']}
+                      compact
+                    />
                     <Select
                       id="runtime-vision-model"
                       value={runtimeConfig.visionModel}
                       onChange={(value) => setRuntimeConfig((previous) => ({ ...previous, visionModel: value }))}
-                      options={buildModelOptions(availableModels, runtimeConfig.visionModel, '自动（跟随 Vision 默认逻辑）')}
+                      options={buildModelOptions(
+                        visionSafeModels,
+                        visionSelectedModelForOptions,
+                        '自动（跟随 Vision 默认逻辑）',
+                      )}
                       disabled={busy}
                       placeholder=""
                     />

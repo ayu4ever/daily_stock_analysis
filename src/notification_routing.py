@@ -12,10 +12,13 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 ROUTABLE_NOTIFICATION_CHANNELS: Tuple[str, ...] = (
     "wechat",
+    "dingtalk",
     "feishu",
     "telegram",
     "email",
     "pushover",
+    "ntfy",
+    "gotify",
     "pushplus",
     "serverchan3",
     "custom",
